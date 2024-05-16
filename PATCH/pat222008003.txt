@@ -1,0 +1,386 @@
+# Patch PAT212008004 created at Mon May 23 22:23:43 2022
+m {'kernel','otemail'}
+o {'pat222008003::OTEmailUtils',&&otemail::OTEmailUtils}
+N OTEmailUtils
+f CopyAttachmentToDisk
+s
+
+function assoc CopyAttachmentToDisk(String srcPath, String attachmentID)
+	
+		Assoc			returnResult = Assoc.CreateAssoc()
+		
+		String			tempDir = $Kernel.FileUtils.GetTempDirWithName( "otemail" )
+		String			fileName
+		
+		Assoc			attachmentResult
+		List			attachmentList
+		Dynamic			attachmentStatus
+		
+		String 			theFileName
+		Boolean			attachmentFound = false
+		Assoc			thisAttachment
+		
+		QDFDropin 		qdf = QDFDropin.New()
+	
+		if (! File.Exists(srcPath) )
+			returnResult.ok = false
+			returnResult.errMsg = [OTEMAIL_ERROR.ErrorRetrievingDocument]
+			return returnResult
+		end
+	
+		// Now, make sure we can find a matching attachment ID
+		attachmentResult = qdf.ListAttachments(srcPath)
+		// SGCustom - Start
+			RestClient 	rc
+			Assoc		param = Assoc.CreateAssoc()
+			String		SECTION	 = 'SGCustom_ReadMSG'
+			String		hostname	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'hostname')
+			String		uriRead	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'urlRead')
+			String		uriDownload	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'urlDownload')
+			String		timeout	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'timeout')
+			String		port	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'port')
+			if (isDefined(uriRead))
+				if (isUndefined(hostname))
+					hostname = 'localhost'
+				end
+				if(isundefined(timeout))
+					timeout = '90'
+				end
+				if(isundefined(port))
+					port = '80'
+				end
+				rc = RestClient.New(hostname,Str.StringToInteger(port),uriRead,Str.StringToInteger(timeout))
+				param.path = srcPath
+				Dynamic result = rc.Post(param,"",0)
+				Dynamic content = Str.Strip(result.content,'"')
+				Dynamic listMSG = Str.Elements(content , "|" )
+				Dynamic i, splitInfo
+				for i in listMSG
+					if (i!='')
+						splitInfo = Str.Elements(i, ",")
+						integer iteration = Str.StringToInteger(splitInfo[1])+1
+						attachmentResult.Attachments[iteration]=Assoc.CreateAssoc()
+						attachmentResult.Attachments[iteration].AttachmentID = splitInfo[1]
+						attachmentResult.Attachments[iteration].AttachmentName = splitInfo[2]
+						attachmentResult.Attachments[iteration].EstimatedAttachmentSize = Str.StringToInteger(splitInfo[3])
+					end
+				end
+			end
+			// SGCustom - End
+		if (attachmentResult.ResultCode != 0)
+			// Couldn't get list of attachments?
+			returnResult.ok = false
+			
+			if IsDefined($("QDF_" + Str.String(attachmentResult.ResultCode)))
+				returnResult.errMsg = [OTEMAIL_ERROR.ErrorListingAttachments] + "  " + $("QDF_" + Str.String(attachmentResult.ResultCode))
+	
+			else
+				returnResult.errMsg = [OTEMAIL_ERROR.ErrorListingAttachments]
+			end
+				
+			return returnResult
+		else
+			attachmentList = attachmentResult.Attachments
+		end
+		
+		// Now, try to find the matching attachment ID and identify that
+		for thisAttachment in attachmentList
+		
+			if (isUndefined(thisAttachment) || isError(thisAttachment) )
+				continue
+			end
+			
+			if (thisAttachment.AttachmentID == attachmentID)
+				attachmentFound = true
+				theFileName = $OTEMail.OTEMailUtils.BaseName(thisAttachment.AttachmentName)
+			end
+		end
+		
+		if (! attachmentFound )
+			// We got a request for an unknown attachment?
+			returnResult.ok = false
+			returnResult.errMsg = Str.Format([OTEMAIL_ERROR.ErrorRetrievingAttachmentId1], attachmentID)
+			return returnResult
+		end
+		
+	
+		// We found a matching attachment ID, we know the file name.  Try to extract
+		// Don't use any of the original filename, and add in some uniqueness so we don't
+		// have to escape or worry about collisions.
+		
+		//SGCustom - Start
+		if(uriDownload)
+			rc = RestClient.New(hostname,Str.StringToInteger(port),uriDownload,Str.StringToInteger(timeout))
+			Assoc paramDownload = Assoc.CreateAssoc()
+			paramDownload.emailpath = srcPath
+			paramDownload.tempDir = tempDir
+			paramDownload.filename = theFileName
+			Dynamic downloadResult = rc.Post(paramDownload,"",0)
+			if (!IsError(downloadResult))
+				List fileList
+				String ext
+				fileList = Str.Elements(theFileName, ".")		
+				ext = fileList[Length(fileList)]
+				if (ext == "msg")
+					fileName = downloadResult.content
+					attachmentStatus = 0
+				else
+					fileName = Str.Format("%1%2_%3.dat", tempDir, Date.Tick(), Date.Tick() )
+					attachmentStatus = qdf.ExtractAttachment( srcPath, attachmentID , fileName )
+				end
+			end
+		end
+		//SGCustom - End
+		
+		
+		
+		
+		
+		if (attachmentStatus == 0 || attachmentStatus == Undefined)
+			// all OK
+			returnResult.ok = true
+			returnResult.filePath = fileName
+			returnResult.fileName = theFileName
+		else
+			// failed?
+			returnResult.ok = false
+	
+			if IsDefined($("QDF_" + Str.String(attachmentResult.ResultCode)))
+				returnResult.errMsg = Str.Format([OTEMAIL_ERROR.ErrorRetrievingAttachmentId1], attachmentID) + "  " + \
+				    $("QDF_" + Str.String(attachmentResult.ResultCode))
+			else
+				returnResult.errMsg = Str.Format([OTEMAIL_ERROR.ErrorRetrievingAttachmentId1], attachmentID)
+			end
+	
+		end
+		
+		return returnResult
+	
+	end
+
+sEND
+f MessageListAttachments
+s
+	
+		// Given a prgCtx, and objid and a version, attempt to extract the list of attachments
+		// and return them to the caller
+		//
+		// Returns an assoc as follows:
+		//		ok 			-- the status of the operation
+		//		attachments -- A list of Assoc as returned by QDF.ListAttachments except the
+		//                     mimetype wil be populated from the extension if not available
+		
+		
+		function Assoc MessageListAttachments(Object PrgCtx, Integer objid, Integer version)
+		
+		
+			Assoc		returnResult = Assoc.CreateAssoc()
+			Assoc 		fileResult
+			QDFDropin 	qdf
+			Assoc 		attachmentsResult
+			
+			fileResult = $OTEMail.OTEmailUtils.CopyVersionToDisk(PrgCtx, objid, version)
+			
+			if (fileResult.ok == false)
+				// an error occured
+				returnResult.ok = false
+				if (isDefined(fileResult.errMsg) )
+					returnResult.errMsg = fileResult.errMsg
+				else
+					returnResult.errMsg = [OTEMAIL_ERROR.ErrorRetrievingDocument]
+				end
+				
+				return returnResult
+			end
+			
+			
+			qdf = QDFDropin.New()
+			
+			attachmentsResult = qdf.ListAttachments( fileResult.filePath )
+			// SGCustom - Start
+			RestClient 	rc
+			Assoc		param = Assoc.CreateAssoc()
+			String		SECTION	 = 'SGCustom_ReadMSG'
+			String		hostname	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'hostname')
+			String		uriRead	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'urlRead')
+			String		timeout	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'timeout')
+			String		port	 = $KERNEL.SystemPreferences.GetPref(SECTION, 'port')
+			
+			// Read MSG extension in email attachment
+			if (isDefined(uriRead))
+				if (isUndefined(hostname))
+					hostname = 'localhost'
+				end
+				if(isundefined(timeout))
+					timeout = '90'
+				end
+				if(isundefined(port))
+					port = '80'
+				end
+				rc = RestClient.New(hostname,Str.StringToInteger(port),uriRead,Str.StringToInteger(timeout))
+				param.path = fileResult.filePath
+				Dynamic result = rc.Post(param,"",0)
+				if (result.content != 'null')
+					Dynamic content = Str.Strip(result.content,'"')
+					Dynamic listMSG = Str.Elements(content , "|" )
+					Dynamic i, splitInfo
+					for i in listMSG
+						if (i!='')
+							splitInfo = Str.Elements(i, ",")
+							integer iteration = Str.StringToInteger(splitInfo[1])+1
+							attachmentsResult.Attachments[iteration]=Assoc.CreateAssoc()
+							attachmentsResult.Attachments[iteration].AttachmentID = splitInfo[1]
+							attachmentsResult.Attachments[iteration].AttachmentName = splitInfo[2]
+							attachmentsResult.Attachments[iteration].EstimatedAttachmentSize = Str.StringToInteger(splitInfo[3])
+						end
+					end
+				end
+			end
+			
+			// Restricting embedded attachment to the list of attachments
+			if IsDefined(attachmentsResult.Attachments)
+				String uriEmbedded = $KERNEL.SystemPreferences.GetPref(SECTION, 'urlReadEmbedded')
+				rc = RestClient.New(hostname,Str.StringToInteger(port),uriEmbedded,Str.StringToInteger(timeout))
+				Dynamic rEmbedded = rc.Post(param,"",0)
+				if (rEmbedded.content != "null")
+					Dynamic embContent = Str.Strip(rEmbedded.content,'"')
+					Dynamic listEmb = Str.Elements(embContent , "|" )
+					Dynamic	att, j
+					for j in listEmb
+						if (j != '')
+							for att in attachmentsResult.Attachments
+								if att.AttachmentID == j
+									attachmentsResult.Attachments = List.SetRemove(attachmentsResult.Attachments, att)
+								end
+							end
+						end
+					end
+				end
+				
+			end
+			// SGCustom - End
+
+			if (attachmentsResult.ResultCode != 0)
+				// An error occured in getting the attachment list
+				returnResult.ok = false
+		
+				if IsDefined($("QDF_" + Str.String(attachmentsResult.ResultCode)))
+					returnResult.errMsg = [OTEMAIL_ERROR.ErrorListingAttachments] + "  " + $("QDF_" + Str.String(attachmentsResult.ResultCode))
+				else
+					returnResult.errMsg = [OTEMAIL_ERROR.ErrorListingAttachments]
+				end
+				
+				return returnResult
+			end
+			
+			// We have the list of attachments, remove the version copy from disk
+			File.Delete(fileResult.filePath)
+			
+			// Clean up the attachments list
+			returnResult.attachments = cleanupAttachmentsList(attachmentsResult.attachments)
+			returnResult.ok = true
+			
+			return returnResult	
+			
+		
+		end
+		
+		
+		// ------------------------------------------------------------------------------------
+		//
+		// Clean up the contents of the attachments list we got back from the dropin as follows:
+		// 
+		//   o  DXL files don't store the mimetype, attempt to derive it based on the filename if unset
+		//   o  Attempt to determine the image which will correspond to the mimetype of this object
+		//      so the caller has it available
+		
+		function List cleanupAttachmentsList(List attachments)
+			Assoc		thisAttachment
+			
+			String 		theFileName
+			List		theFileList
+			String		theExtension
+			String		theGIF
+			
+			String		supportPrefix = $OTEmail.RequestHandlers.Module( "webdoc" ).SupportPrefix()
+			
+			
+		
+			// Now, simplify the life of the caller by filling in the mimetypes where they were
+			// unavailable (DXL files), get the path to the mimetype GIF which will be needed
+			
+			List		returnedAttachments = {}
+			Integer		pos = 0
+			
+			for thisAttachment in attachments
+			
+				String thisMime
+				pos += 1
+				
+				if (isUndefined(thisAttachment) ||isError(thisAttachment) )
+					continue
+				end
+				
+				thisAttachment.AttachmentName = $OTEMail.OTEMailUtils.BaseName(thisAttachment.AttachmentName)
+				
+				if (isUndefined(thisAttachment.AttachmentName) || Length(thisAttachment.AttachmentName) == 0)
+					thisAttachment.AttachmentName = Str.Format("attachment%1.bin", pos)
+				end
+				
+				if (isUndefined(thisAttachment.AttachmentType) || thisAttachment.AttachmentType == "" \
+						|| Str.CmpI(thisAttachment.AttachmentType,  "application/octet-stream") == 0)
+						
+					// The mimetype for this attachment is not populated (or is octet-stream), 
+					// see if we can derive from the file extension
+					
+					theFileName = thisAttachment.AttachmentName
+					theFileList = Str.Elements(theFileName, ".")
+					
+					if (Length(theFileList) > 1)
+						// Last element should be the extension
+						
+						theExtension = theFileList[ Length(theFileList) ]
+						
+						thisMime = $WebDSP.MimeTypePkg.GetFileExtMIMEType(theExtension)
+						
+						if (isDefined(thisMime) )
+							// Found the mimetype
+							thisAttachment.AttachmentType = thisMime
+						else
+							// Couldn't find the mimetype?  application/octet-stream
+							thisAttachment.AttachmentType = "application/octet-stream"
+							thisMime = thisAttachment.AttachmentType
+						end
+						
+					else
+						// The filename had only a single element.  No extension, no mimetype
+						thisAttachment.AttachmentType = "application/octet-stream"
+						thisMime = thisAttachment.AttachmentType
+							
+					end
+				else
+					// we have the mimetype
+					thisMime = thisAttachment.AttachmentType
+				end
+				
+				
+				// Now, we know the mimetype.  Try to look up the corresponding GIF for this type
+				theGif = $WebDSP.MimetypePkg.GetMimeTypeGIF(thisMime)
+				
+				thisAttachment.mimeGif = supportPrefix +  theGif
+			
+				if (Length(returnedAttachments) == 0)
+					returnedAttachments = { thisAttachment }
+				else
+					returnedAttachments = { @returnedAttachments , thisAttachment }
+				end
+			end
+			
+			return returnedAttachments
+		
+		
+		end
+	
+
+
+sEND
