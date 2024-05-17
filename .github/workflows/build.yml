@@ -18,22 +18,13 @@ jobs:
         with:
           java-version: 17
 
-      - name: Restore NuGet packages
-        run: nuget restore
-
-      - name: Cache NuGet packages
-        uses: actions/cache@v1
-        with:
-          path: ~/.nuget/packages
-          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
-          restore-keys: ${{ runner.os }}-nuget
-
       - name: Cache SonarQube packages
         uses: actions/cache@v1
         with:
           path: ~\sonar\cache
           key: ${{ runner.os }}-sonar
           restore-keys: ${{ runner.os }}-sonar
+
       - name: Cache SonarQube scanner
         id: cache-sonar-scanner
         uses: actions/cache@v1
@@ -55,3 +46,13 @@ jobs:
           .\.sonar\scanner\dotnet-sonarscanner begin /k:"kevin1234h8_emailbrowser-api-cicd_AY-E3k9MbMA1ixqTozyc" /d:sonar.login="${{ secrets.SONAR_TOKEN }}" /d:sonar.host.url="${{ secrets.SONAR_HOST_URL }}"
           dotnet build
           .\.sonar\scanner\dotnet-sonarscanner end /d:sonar.login="${{ secrets.SONAR_TOKEN }}"
+
+      - name: Restore NuGet packages
+        run: nuget restore
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v1
+        with:
+          path: ~/.nuget/packages
+          key: ${{ runner.os }}-nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: ${{ runner.os }}-nuget
